@@ -9,9 +9,12 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -31,6 +34,8 @@ const (
 )
 
 var (
+	sigtermReceived int32
+
 	config Config
 	wg     sync.WaitGroup
 )
@@ -68,11 +73,22 @@ func init() {
 }
 
 func main() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, syscall.SIGTERM)
+	go func() {
+		for {
+			sig := <-c
+			if sig == syscall.SIGTERM {
+				logger.Infof("SIGTERM received. shutting down...")
+				atomic.StoreInt32(&sigtermReceived, 1)
+			}
+		}
+	}()
+
 	if !config.validateParameter() {
 		fmt.Println("invalid config json from ssm")
 		os.Exit(0)
 	}
-	fmt.Println(config)
 
 	for _, s := range config.Services {
 		wg.Add(1)
@@ -198,13 +214,18 @@ func setDesiredCount(svc *ecs.ECS, s Service, nextCount int64) error {
 }
 
 //タイマーイベント
-func checkLoop(timerCh chan bool, suspendCh chan int, ticker int) {
+func checkLoop(logger *logrus.Entry, timerCh chan bool, suspendCh chan int, ticker int) {
 	t := time.NewTicker(time.Duration(ticker) * time.Second)
 	defer t.Stop()
 	for {
 		select {
 		case <-t.C: //タイマーイベント
-			timerCh <- true
+			if atomic.LoadInt32(&sigtermReceived) == 0 {
+				timerCh <- true
+			} else {
+				logger.Infof("stop timer")
+				t.Stop()
+			}
 		case stopTime := <-suspendCh:
 			t.Stop()
 			time.Sleep(time.Duration(stopTime) * time.Second)
