@@ -88,7 +88,7 @@ func main() {
 	}
 	configJSON, err := fetchParameterStore(paramKey)
 	if err != nil {
-		logger.Fatalln("fetchParameterStore error: %s", err)
+		logger.Fatalf("fetchParameterStore error: %s", err)
 	}
 
 	json.Unmarshal([]byte(configJSON), &config)
