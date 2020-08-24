@@ -32,13 +32,13 @@ const (
 
 var (
 	config Config
-	region string
 	wg     sync.WaitGroup
 )
 
 // Config ... config persed config.json from ParameterStore
 type Config struct {
 	Services []Service `json:"Services"`
+	Region   string
 }
 
 // Service ... autoscale settings each service
@@ -55,10 +55,15 @@ type Service struct {
 }
 
 func init() {
-	//region = os.Getenv("THIS_REGION")
-	//configJSON := fetchParameterStore(os.Getenv("CONFIG_JSON_PARAM_NAME"))
-	region = "ap-northeast-1"
-	configJSON := fetchParameterStore("/ecs/fast-autoscaler/config.json")
+	paramKey := os.Getenv("AUTOSCALER_PARAMKEY")
+	if paramKey == "" {
+		paramKey = "/ecs/fast-autoscaler/config.json"
+	}
+	config.Region = os.Getenv("AUTOSCALER_REGION")
+	if config.Region == "" {
+		config.Region = "ap-northeast-1"
+	}
+	configJSON := fetchParameterStore(paramKey)
 	json.Unmarshal([]byte(configJSON), &config)
 }
 
@@ -92,7 +97,6 @@ func startChecker(s Service) {
 				scaleout(s, count)
 				suspendCh <- checkGracePeriod
 			}
-			break
 		}
 	}
 }
@@ -101,7 +105,7 @@ func scaleout(s Service, count int) {
 	sess := session.Must(session.NewSession())
 	svc := ecs.New(
 		sess,
-		aws.NewConfig().WithRegion(region),
+		aws.NewConfig().WithRegion(config.Region),
 	)
 
 	desiredCount, err := getDesiredCount(svc, s)
@@ -268,7 +272,7 @@ func fetchParameterStore(paramName string) string {
 	sess := session.Must(session.NewSession())
 	svc := ssm.New(
 		sess,
-		aws.NewConfig().WithRegion(region),
+		aws.NewConfig().WithRegion(config.Region),
 	)
 
 	res, err := svc.GetParameter(&ssm.GetParameterInput{
