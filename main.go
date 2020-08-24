@@ -278,7 +278,6 @@ func (c *Config) validateParameter() bool {
 			return false
 		}
 		// 指定がない場合にデフォルト値で埋める
-		s.ScaleoutThreshold = 10
 		if s.ScaleoutThreshold == 0 {
 			s.ScaleoutThreshold = defScaleoutThreshold
 		}
