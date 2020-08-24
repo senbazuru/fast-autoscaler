@@ -18,10 +18,10 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ecs"
 	"github.com/aws/aws-sdk-go/service/ssm"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -73,6 +73,12 @@ func init() {
 }
 
 func main() {
+	logger := &logrus.Logger{
+		Out:       os.Stdout,
+		Formatter: &logrus.JSONFormatter{},
+		Level:     logrus.DebugLevel,
+		Hooks:     make(logrus.LevelHooks),
+	}
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGTERM)
 	go func() {
@@ -86,61 +92,69 @@ func main() {
 	}()
 
 	if !config.validateParameter() {
-		fmt.Println("invalid config json from ssm")
-		os.Exit(0)
+		logger.Fatalln("invalid config json from ssm")
 	}
 
 	for _, s := range config.Services {
 		wg.Add(1)
 		go func(s Service) {
-			startChecker(s)
+			logger := logger.WithFields(logrus.Fields{"service": s.EcsServiceName})
+			startChecker(logger, s)
 			defer wg.Done()
 		}(s)
 	}
 	wg.Wait()
 }
 
-func startChecker(s Service) {
+func startChecker(logger *logrus.Entry, s Service) {
 	timerCh := make(chan bool)
 	suspendCh := make(chan int)
-	go checkLoop(timerCh, suspendCh, s.CheckInterval)
+	go checkLoop(logger, timerCh, suspendCh, s.CheckInterval)
 	for {
 		select {
 		case <-timerCh: //タイマーイベント
-			count, _ := getNginxConns(s)
-			fmt.Printf("%s: %d\n", s.EcsServiceName, count)
+			count, err := getNginxConns(s)
+			if err != nil {
+				logger.Warnf("getNginxConns err: %s", err)
+			} else {
+				logger.Infof("active conns: %d", count)
+			}
 			if s.ScaleoutThreshold < count {
-				scaleout(s, count)
+				scaleout(logger, s, count)
 				suspendCh <- checkGracePeriod
 			}
 		}
 	}
 }
 
-func scaleout(s Service, count int) {
+func scaleout(logger *logrus.Entry, s Service, count int) {
 	sess := session.Must(session.NewSession())
 	svc := ecs.New(
 		sess,
 		aws.NewConfig().WithRegion(config.Region),
 	)
 
-	desiredCount, err := getDesiredCount(svc, s)
+	desiredCount, err := getDesiredCount(logger, svc, s)
 	if err != nil {
-		fmt.Println(err)
+		logger.Warnf("getDesiredCount error: %s", err)
 		return
 	}
 	nextCount := desiredCount * 2
 	if desiredCount < s.MinDesiredCount {
 		nextCount = s.MinDesiredCount * 2
 	}
-	fmt.Printf("%s cur:%d, next:%d\n", s.EcsServiceName, desiredCount, nextCount)
+	logger.Infof("change desired count current:%d, next:%d", desiredCount, nextCount)
 
-	setDesiredCount(svc, s, nextCount)
+	err = setDesiredCount(logger, svc, s, nextCount)
+	if err != nil {
+		logger.Warnf("setDesiredCount error: %s", err)
+		return
+	}
 
-	scaleoutNotification(s, count, int(desiredCount), int(nextCount))
+	scaleoutNotification(logger, s, count, int(desiredCount), int(nextCount))
 }
 
-func getDesiredCount(svc *ecs.ECS, s Service) (int64, error) {
+func getDesiredCount(logger *logrus.Entry, svc *ecs.ECS, s Service) (int64, error) {
 	resp, err := svc.DescribeServices(&ecs.DescribeServicesInput{
 		Cluster: aws.String(s.EcsClusterName),
 		Services: []*string{
@@ -148,69 +162,21 @@ func getDesiredCount(svc *ecs.ECS, s Service) (int64, error) {
 		},
 	})
 	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			switch aerr.Code() {
-			case ecs.ErrCodeServerException:
-				fmt.Println(ecs.ErrCodeServerException, aerr.Error())
-			case ecs.ErrCodeClientException:
-				fmt.Println(ecs.ErrCodeClientException, aerr.Error())
-			case ecs.ErrCodeInvalidParameterException:
-				fmt.Println(ecs.ErrCodeInvalidParameterException, aerr.Error())
-			case ecs.ErrCodeClusterNotFoundException:
-				fmt.Println(ecs.ErrCodeClusterNotFoundException, aerr.Error())
-			default:
-				fmt.Println(aerr.Error())
-			}
-		} else {
-			// Print the error, cast err to awserr.Error to get the Code and
-			// Message from an error.
-			fmt.Println(err.Error())
-		}
-		fmt.Println(err)
-		return 0, err
+		return 0, fmt.Errorf("svc.DescribeServices error: %w", err)
 	}
-	desiredCount := *resp.Services[0].DesiredCount
-	fmt.Println(desiredCount)
-	return desiredCount, nil
+	return *resp.Services[0].DesiredCount, nil
 }
 
-func setDesiredCount(svc *ecs.ECS, s Service, nextCount int64) error {
+func setDesiredCount(logger *logrus.Entry, svc *ecs.ECS, s Service, nextCount int64) error {
 	_, err := svc.UpdateService(&ecs.UpdateServiceInput{
 		Cluster:      aws.String(s.EcsClusterName),
 		Service:      aws.String(s.EcsServiceName),
 		DesiredCount: aws.Int64(nextCount),
 	})
 	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			switch aerr.Code() {
-			case ecs.ErrCodeServerException:
-				fmt.Println(ecs.ErrCodeServerException, aerr.Error())
-			case ecs.ErrCodeClientException:
-				fmt.Println(ecs.ErrCodeClientException, aerr.Error())
-			case ecs.ErrCodeInvalidParameterException:
-				fmt.Println(ecs.ErrCodeInvalidParameterException, aerr.Error())
-			case ecs.ErrCodeClusterNotFoundException:
-				fmt.Println(ecs.ErrCodeClusterNotFoundException, aerr.Error())
-			case ecs.ErrCodeServiceNotFoundException:
-				fmt.Println(ecs.ErrCodeServiceNotFoundException, aerr.Error())
-			case ecs.ErrCodeServiceNotActiveException:
-				fmt.Println(ecs.ErrCodeServiceNotActiveException, aerr.Error())
-			case ecs.ErrCodePlatformUnknownException:
-				fmt.Println(ecs.ErrCodePlatformUnknownException, aerr.Error())
-			case ecs.ErrCodePlatformTaskDefinitionIncompatibilityException:
-				fmt.Println(ecs.ErrCodePlatformTaskDefinitionIncompatibilityException, aerr.Error())
-			case ecs.ErrCodeAccessDeniedException:
-				fmt.Println(ecs.ErrCodeAccessDeniedException, aerr.Error())
-			default:
-				fmt.Println(aerr.Error())
-			}
-		} else {
-			// Print the error, cast err to awserr.Error to get the Code and
-			// Message from an error.
-			fmt.Println(err.Error())
-		}
+		return fmt.Errorf("svc.UpdateService error: %w", err)
 	}
-	return err
+	return nil
 }
 
 //タイマーイベント
@@ -223,12 +189,14 @@ func checkLoop(logger *logrus.Entry, timerCh chan bool, suspendCh chan int, tick
 			if atomic.LoadInt32(&sigtermReceived) == 0 {
 				timerCh <- true
 			} else {
-				logger.Infof("stop timer")
+				logger.Infoln("stop timer")
 				t.Stop()
 			}
 		case stopTime := <-suspendCh:
+			logger.Infof("pause timer for %d seconds", stopTime)
 			t.Stop()
 			time.Sleep(time.Duration(stopTime) * time.Second)
+			logger.Infoln("resume timer")
 			t = time.NewTicker(time.Duration(ticker) * time.Second)
 		}
 	}
@@ -237,8 +205,7 @@ func checkLoop(logger *logrus.Entry, timerCh chan bool, suspendCh chan int, tick
 func getNginxConns(s Service) (count int, err error) {
 	respBytes, err := requestNginxStatus(s)
 	if err != nil {
-		fmt.Println(err)
-		return
+		return 0, err
 	}
 	scanner := bufio.NewScanner(strings.NewReader(string(respBytes)))
 	for scanner.Scan() {
@@ -248,12 +215,12 @@ func getNginxConns(s Service) (count int, err error) {
 			countStr := strings.Replace(str[idx+len(prefixActiveConn):], " ", "", -1)
 			count, err = strconv.Atoi(countStr)
 			if err != nil {
-				return
+				return 0, err
 			}
 			break
 		}
 	}
-	return
+	return count, nil
 }
 
 func requestNginxStatus(s Service) ([]byte, error) {
@@ -262,8 +229,7 @@ func requestNginxStatus(s Service) ([]byte, error) {
 		req.Header.Set(s.StatusAuthName, s.StatusAuthValue)
 	}
 	if err != nil {
-		err = fmt.Errorf("http.NewRequest error: %w", err)
-		return nil, err
+		return nil, fmt.Errorf("http.NewRequest error: %w", err)
 	}
 	client := &http.Client{
 		Timeout:   time.Duration(s.CheckInterval) * time.Second,
@@ -272,15 +238,9 @@ func requestNginxStatus(s Service) ([]byte, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		err = fmt.Errorf("httpClient.Do error: %w", err)
-		return nil, err
+		return nil, fmt.Errorf("httpClient.Do error: %w", err)
 	}
-	defer func() {
-		_err := resp.Body.Close()
-		if _err != nil {
-			fmt.Printf("body.Close error: %s", _err)
-		}
-	}()
+	defer resp.Body.Close()
 
 	respStr, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
@@ -296,14 +256,10 @@ func fetchParameterStore(paramName string) string {
 		aws.NewConfig().WithRegion(config.Region),
 	)
 
-	res, err := svc.GetParameter(&ssm.GetParameterInput{
+	res, _ := svc.GetParameter(&ssm.GetParameterInput{
 		Name:           aws.String(paramName),
 		WithDecryption: aws.Bool(true),
 	})
-	if err != nil {
-		fmt.Println(err)
-		return ""
-	}
 	return *res.Parameter.Value
 }
 
@@ -331,9 +287,10 @@ func (c *Config) validateParameter() bool {
 	return true
 }
 
-func scaleoutNotification(s Service, activeConns, curCount, newCount int) {
+func scaleoutNotification(logger *logrus.Entry, s Service, activeConns, curCount, newCount int) {
 	hookURL := s.SlackWebhookURL
 	if hookURL == "" {
+		logger.Infoln("slack notification skipped, because not configured")
 		return
 	}
 
@@ -348,10 +305,8 @@ func scaleoutNotification(s Service, activeConns, curCount, newCount int) {
 
 	err := postToSlack(hookURL, "{\"text\":\""+message+"\"}")
 	if err != nil {
-		return
+		logger.Warnf("postToSlack error: %s", err)
 	}
-
-	return
 }
 
 func postToSlack(hookURL string, msgJSON string) error {
