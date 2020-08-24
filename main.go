@@ -59,19 +59,6 @@ type Service struct {
 	SlackWebhookURL   string `json:"SlackWebhookUrl"`
 }
 
-func init() {
-	paramKey := os.Getenv("AUTOSCALER_PARAMKEY")
-	if paramKey == "" {
-		paramKey = "/ecs/fast-autoscaler/config.json"
-	}
-	config.Region = os.Getenv("AUTOSCALER_REGION")
-	if config.Region == "" {
-		config.Region = "ap-northeast-1"
-	}
-	configJSON := fetchParameterStore(paramKey)
-	json.Unmarshal([]byte(configJSON), &config)
-}
-
 func main() {
 	logger := &logrus.Logger{
 		Out:       os.Stdout,
@@ -90,6 +77,21 @@ func main() {
 			}
 		}
 	}()
+
+	paramKey := os.Getenv("AUTOSCALER_PARAMKEY")
+	if paramKey == "" {
+		paramKey = "/ecs/fast-autoscaler/config.json"
+	}
+	config.Region = os.Getenv("AUTOSCALER_REGION")
+	if config.Region == "" {
+		config.Region = "ap-northeast-1"
+	}
+	configJSON, err := fetchParameterStore(paramKey)
+	if err != nil {
+		logger.Fatalln("fetchParameterStore error: %s", err)
+	}
+
+	json.Unmarshal([]byte(configJSON), &config)
 
 	if !config.validateParameter() {
 		logger.Fatalln("invalid config json from ssm")
@@ -117,7 +119,7 @@ func startChecker(logger *logrus.Entry, s Service) {
 			if err != nil {
 				logger.Warnf("getNginxConns err: %s", err)
 			} else {
-				logger.Infof("active conns: %d", count)
+				logger.Infof("nginx connections: %d", count)
 			}
 			if s.ScaleoutThreshold < count {
 				scaleout(logger, s, count)
@@ -249,18 +251,21 @@ func requestNginxStatus(s Service) ([]byte, error) {
 	return respStr, nil
 }
 
-func fetchParameterStore(paramName string) string {
+func fetchParameterStore(paramName string) (string, error) {
 	sess := session.Must(session.NewSession())
 	svc := ssm.New(
 		sess,
 		aws.NewConfig().WithRegion(config.Region),
 	)
 
-	res, _ := svc.GetParameter(&ssm.GetParameterInput{
+	res, err := svc.GetParameter(&ssm.GetParameterInput{
 		Name:           aws.String(paramName),
 		WithDecryption: aws.Bool(true),
 	})
-	return *res.Parameter.Value
+	if err != nil {
+		return "", err
+	}
+	return *res.Parameter.Value, nil
 }
 
 func (c *Config) validateParameter() bool {
