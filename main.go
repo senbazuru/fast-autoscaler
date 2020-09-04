@@ -59,6 +59,13 @@ type Service struct {
 	SlackWebhookURL   string `json:"SlackWebhookUrl"`
 }
 
+// NginxState ... result of nginx status check
+type NginxState struct {
+	RespBody   string
+	StatusCode int
+	ConnCount  int
+}
+
 func main() {
 	logger := &logrus.Logger{
 		Out:       os.Stdout,
@@ -115,14 +122,16 @@ func startChecker(logger *logrus.Entry, s Service) {
 	for {
 		select {
 		case <-timerCh: //タイマーイベント
-			count, err := getNginxConns(s)
+			state, err := getNginxState(s)
 			if err != nil {
-				logger.Warnf("getNginxConns err: %s", err)
+				logger.Warnf("getNginxState err: %s", err)
+			} else if state.StatusCode != 200 {
+				logger.Infof("nginx status code: %d", state.StatusCode)
 			} else {
-				logger.Infof("nginx connections: %d", count)
+				logger.Infof("nginx connections: %d", state.ConnCount)
 			}
-			if s.ScaleoutThreshold < count {
-				scaleout(logger, s, count)
+			if state.StatusCode == 503 || s.ScaleoutThreshold < state.ConnCount {
+				scaleout(logger, s, state.ConnCount)
 				suspendCh <- checkGracePeriod
 			}
 		}
@@ -204,34 +213,35 @@ func checkLoop(logger *logrus.Entry, timerCh chan bool, suspendCh chan int, tick
 	}
 }
 
-func getNginxConns(s Service) (count int, err error) {
-	respBytes, err := requestNginxStatus(s)
+func getNginxState(s Service) (NginxState, error) {
+	state, err := requestNginxState(s)
 	if err != nil {
-		return 0, err
+		return state, err
 	}
-	scanner := bufio.NewScanner(strings.NewReader(string(respBytes)))
+	scanner := bufio.NewScanner(strings.NewReader(state.RespBody))
 	for scanner.Scan() {
 		str := scanner.Text()
 		idx := strings.Index(str, prefixActiveConn)
 		if idx != -1 {
 			countStr := strings.Replace(str[idx+len(prefixActiveConn):], " ", "", -1)
-			count, err = strconv.Atoi(countStr)
+			state.ConnCount, err = strconv.Atoi(countStr)
 			if err != nil {
-				return 0, err
+				return state, err
 			}
 			break
 		}
 	}
-	return count, nil
+	return state, nil
 }
 
-func requestNginxStatus(s Service) ([]byte, error) {
+func requestNginxState(s Service) (NginxState, error) {
+	status := NginxState{}
 	req, err := http.NewRequest(http.MethodGet, s.StatusURL, nil)
 	if s.StatusAuthName != "" {
 		req.Header.Set(s.StatusAuthName, s.StatusAuthValue)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("http.NewRequest error: %w", err)
+		return status, fmt.Errorf("http.NewRequest error: %w", err)
 	}
 	client := &http.Client{
 		Timeout:   time.Duration(s.CheckInterval) * time.Second,
@@ -240,15 +250,17 @@ func requestNginxStatus(s Service) ([]byte, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("httpClient.Do error: %w", err)
+		return status, fmt.Errorf("httpClient.Do error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respStr, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return status, err
 	}
-	return respStr, nil
+	status.StatusCode = resp.StatusCode
+	status.RespBody = string(respStr)
+	return status, nil
 }
 
 func fetchParameterStore(paramName string) (string, error) {
