@@ -1,4 +1,4 @@
-module github.com/miyaz/fast-autoscaler
+module github.com/senbazuru/fast-autoscaler
 
 go 1.14
 
