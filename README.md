@@ -117,6 +117,8 @@ fast-autoscalerの更新手順
 
 ## 利用手順
 
+Fargateで動かす場合の簡易的な手順です（ちゃんとしたものはQiitaに書く予定）
+
 ### Slack Webhook作成
 
 [こちら](https://slack.com/help/articles/115005265063-Incoming-webhooks-for-Slack)に従いWebhookを発行する
@@ -160,3 +162,9 @@ Fargateのタスクロールに指定するIAMロールを作成します。
   - クラスタ名：fast-autoscaler
   - サービス名：fast-autoscaler
     - タスク数(1)で実行
+
+### おまけ（ローカル簡易実行）
+
+```
+docker run -v ~/.aws:/root/.aws ghcr.io/senbazuru/fast-autoscaler
+```
