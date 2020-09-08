@@ -80,7 +80,17 @@ fast-autoscalerは、そういうケースに対応し、より高速にスケ�
   - ただし、現在のタスク数が1の場合に2倍にしても2にしかならずスケール不足となる可能性があります  
     その場合はMinDesiredCountを指定してください。この値をタスク数の下限値として動作します  
     ```例）現在タスク数=３、MinDesiredCount=5の場合、3<5なので現在のタスク数を5とみなし、その2倍の10にDesiredCountを変更します。```
-
+- StatusAuthName/StatusAuthValueで指定した値が`/nginx-status`へのリクエストにヘッダとして追加されます
+  - fast-autoscaler以外から`/nginx-status`へのリクエストを防ぐためALB振り分けルールのヘッダ認証で使用します
+- SlackWebhookUrlに指定があればスケールアウト時にSlackに通知を行います
+  - 下記イメージ  
+  scaleout example-app service  
+```
+ActiveConnections: 161
+DesiredCount(cur): 2
+DesiredCount(new): 10
+```
+  
 ## 処理フロー
 
 1. コンテナ起動時にパラメータストアから設定情報(json形式,詳細後述)を取得
@@ -90,7 +100,7 @@ fast-autoscalerは、そういうケースに対応し、より高速にスケ�
 1. 閾値を超えていない場合）  
     -> 一定周期での`/nginx-status`チェックを継続
 
-下記イメージ
+下記イメージ  
 ![fastAutoscaler](https://raw.github.com/senbazuru/fast-autoscaler/master/fastAutoScaler.png)
 
 ## コンテナイメージ更新手順
