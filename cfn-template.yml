@@ -88,7 +88,7 @@ Resources:
           Subnets: !Ref ContainerSubnetIds
 
 Outputs:
- ConfigNameInParameterStore:
+  ConfigNameInParameterStore:
     Description: Edit the config.json in parameter store
     Value: !Ref ParamStoreConfigJson
 
