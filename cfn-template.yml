@@ -1,0 +1,94 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Templates for building FastAutoscaler"
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  ContainerSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  ContainerSecurityGroups:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+  Image:
+    Type: String
+    Default: ghcr.io/senbazuru/fast-autoscaler
+
+Resources:
+  ParamStoreConfigJson:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /ecs/${AWS::StackName}/config.json
+      Type: String
+      Value: '{"Services":[]}'
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      RoleName: !Sub ${AWS::StackName}-task-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Description: !Sub for ${AWS::StackName} task
+      Policies: 
+        - PolicyName: !Sub ${AWS::StackName}-task-role-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - ecs:UpdateService
+                  - ecs:DescribeServices
+                  - ssm:GetParameter
+                Resource: "*"
+  ECSCluster:
+    Type: "AWS::ECS::Cluster"
+    Properties:
+      ClusterName: !Sub ${AWS::StackName}
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${AWS::StackName}
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AWS::StackName}
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/ecsTaskExecutionRole
+      TaskRoleArn: !Ref ECSTaskRole
+      RequiresCompatibilities:
+        - FARGATE
+      ContainerDefinitions:
+        - Name: !Sub ${AWS::StackName}
+          Image: !Ref Image
+          Environment:                                                                             #(G)
+            - Name: AUTOSCALER_PARAMKEY
+              Value: !Ref ParamStoreConfigJson
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: "ecs"
+  ECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      DesiredCount: 1
+      LaunchType: FARGATE
+      ServiceName: !Sub ${AWS::StackName}
+      TaskDefinition: !Ref ECSTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups: !Ref ContainerSecurityGroups
+          Subnets: !Ref ContainerSubnetIds
+
+Outputs:
+  ConfigNameInParameterStore:
+    Description: Edit the config.json in parameter store
+    Value: !Ref ParamStoreConfigJson
+
